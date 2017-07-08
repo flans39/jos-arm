@@ -1,7 +1,7 @@
 #include <inc/mmu.h>
 #include <inc/memlayout.h>
 
-__attribute__((__aligned__(PGSIZE)))
+__attribute__((__aligned__(PGSIZE*4)))
 pde_t entry_pgdir[NPDENTRIES] = {
 	[0x0] = 0x00000002,
 	[0x1] = 0x00100002,
