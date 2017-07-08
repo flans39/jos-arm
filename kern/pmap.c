@@ -73,6 +73,7 @@ boot_alloc(uint32_t n)
 //
 // From UTOP to ULIM, the user is allowed to read but not write.
 // Above ULIM the user cannot read or write.
+
 void
 mem_init(void)
 {
@@ -87,7 +88,12 @@ mem_init(void)
 
 	//////////////////////////////////////////////////////////////////////
 	// create initial page directory.
-	kern_pgdir = (pde_t *) boot_alloc(4*PGSIZE);
+	for (kern_pgdir = (pde_t *) boot_alloc(0);
+		(unsigned)kern_pgdir & ((1<<14)-1);
+		kern_pgdir = (pde_t *) boot_alloc(0))
+		boot_alloc(PGSIZE);
+	kern_pgdir = (pde_t *) boot_alloc(PGSIZE*4);
+	// cprintf("%x\n", kern_pgdir);
 	memset(kern_pgdir, 0, 4*PGSIZE);
 
 	//////////////////////////////////////////////////////////////////////
@@ -132,7 +138,6 @@ mem_init(void)
 	//      (ie. perm = PTE_U | PTE_P)
 	//    - pages itself -- kernel RW, user NONE
 	// Your code goes here:
-	// lcr4(rcr4()|CR4_PSE);
 	boot_map_region(kern_pgdir, UPAGES, PTSIZE, PADDR(pages), PTE_AP2|PTE_AP1);
 
 	//////////////////////////////////////////////////////////////////////
@@ -158,6 +163,8 @@ mem_init(void)
 	// Your code goes here:
 	boot_map_region(kern_pgdir, KERNBASE, 0x10000000, 0, PTE_AP0);
 
+	boot_map_region(kern_pgdir, GPIOBASE, PTSIZE, 0x3F200000, PTE_AP0);
+
 	// Check that the initial page directory has been set up correctly.
 	check_kern_pgdir();
 
@@ -169,6 +176,12 @@ mem_init(void)
 	// If the machine reboots at this point, you've probably set up your
 	// kern_pgdir wrong.
 	// lcr3(PADDR(kern_pgdir));
+	uint32_t x=PADDR(kern_pgdir);
+	// cprintf("%x", x);
+	asm volatile ("mcr p15, 0, %0, c2, c0, 0" : : "r"(x));
+	// asm volatile ("mcr p15, 0, %0, c2, c0, 1" : : "r"(x));
+	// asm volatile ("mcr p15, 0, %0, c2, c0, 2" : : "r"(0));
+	// asm volatile ("mcr p15, 0, %0, c3, c0, 0" : : "r"(1));	// set domain 0 to client
 
 	check_page_free_list(0);
 
@@ -216,13 +229,17 @@ page_init(void)
 	// NB: DO NOT actually touch the physical memory corresponding to
 	// free pages!
 	size_t i, t=0x100000/PGSIZE-1, r=(size_t)(boot_alloc(0)-KERNBASE)/PGSIZE;
+	// expand entry_pgdir
+	extern pde_t entry_pgdir[];
+	for (i=0x00; i<=0xff; i++)
+		entry_pgdir[0xf00|i] = (i<<20)|2;
 	pages[0].pp_ref = 0;
 	for (i=1; i<t; i++) {
 		pages[i].pp_ref = 0;
 		pages[i].pp_link = page_free_list;
 		page_free_list = &pages[i];
 	}
-	for (; i<r; i++)
+	for (; i<=r; i++)
 		pages[i].pp_ref = 1;
 	for (; i < npages; i++) {
 		pages[i].pp_ref = 0;
@@ -428,20 +445,21 @@ page_remove(pde_t *pgdir, void *va)
 	if (!p) return;
 	page_decref(p);
 	*pte = 0;
-	// tlb_invalidate(pgdir, va);
+	tlb_invalidate(pgdir, va);
 }
 
 //
 // Invalidate a TLB entry, but only if the page tables being
 // edited are the ones currently in use by the processor.
 //
-// void
-// tlb_invalidate(pde_t *pgdir, void *va)
-// {
-// 	// Flush the entry only if we're modifying the current address space.
-// 	// For now, there is only one address space, so always invalidate.
-// 	invlpg(va);
-// }
+void
+tlb_invalidate(pde_t *pgdir, void *va)
+{
+	// Flush the entry only if we're modifying the current address space.
+	// For now, there is only one address space, so always invalidate.
+	// invlpg(va);
+	asm volatile ("mcr p15, 0, %0, c8, c7, 0" :: "r" (0));
+}
 
 
 // --------------------------------------------------------------
@@ -619,7 +637,7 @@ check_kern_pgdir(void)
 	// check PDE permissions
 	for (i = 0; i < NPDENTRIES; i++) {
 		switch (i) {
-		case PDX(UVPT):
+		// case PDX(UVPT):
 		case PDX(KSTACKTOP-1):
 		case PDX(UPAGES):
 			assert(pgdir[i] & PDE_TYPE_PT);
@@ -628,7 +646,7 @@ check_kern_pgdir(void)
 			if (i >= PDX(KERNBASE)) {
 				assert(pgdir[i] & PDE_TYPE_PT);
 				// assert(pgdir[i] & PTE_W);
-			} else
+			} else if (i != PDX(GPIOBASE))
 				assert(pgdir[i] == 0);
 			break;
 		}
@@ -723,8 +741,8 @@ check_page(void)
 	assert(page_insert(kern_pgdir, pp2, (void*) PGSIZE, (PTE_AP0|PTE_AP1)) == 0);
 	assert(check_va2pa(kern_pgdir, PGSIZE) == page2pa(pp2));
 	assert(pp2->pp_ref == 1);
-	assert(*pgdir_walk(kern_pgdir, (void*) PGSIZE, 0) & (PTE_AP1|PTE_AP2));
-	assert(kern_pgdir[0] & (PTE_AP1|PTE_AP2));
+	assert(*pgdir_walk(kern_pgdir, (void*) PGSIZE, 0) & (PTE_AP1));
+	// assert(kern_pgdir[0] & (PTE_AP1));
 
 	// should be able to remap with fewer permissions
 	assert(page_insert(kern_pgdir, pp2, (void*) PGSIZE, PTE_AP0) == 0);
